@@ -1,13 +1,13 @@
-from flask import Flask, render_template_string, jsonify, request, session, redirect, url_for
+from flask import Flask, render_template_string, jsonify, request, session, redirect, url_for, Response
 from datetime import datetime, timedelta
 import pandas as pd
 import openpyxl
 import os
 import re
 import json
+import requests
 
 app = Flask(__name__)
-# Chave de segurança para a tela de login (Sessões)
 app.secret_key = "goiasa_roteirizacao_secreta"
 
 # CONFIGURAÇÕES GERAIS
@@ -50,7 +50,7 @@ LOGIN_TEMPLATE = """
         <form action="/login" method="POST" class="w-full">
             <div class="mb-4">
                 <label class="block text-slate-400 text-xs mb-1 uppercase tracking-wide">Usuário</label>
-                <input type="text" name="usuario" class="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-white text-sm focus:border-emerald-500 outline-none transition-colors" placeholder="Ex: admin" required>
+                <input type="text" name="usuario" class="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-white text-sm focus:border-emerald-500 outline-none transition-colors" placeholder="Ex: treinando" required>
             </div>
             <div class="mb-6">
                 <label class="block text-slate-400 text-xs mb-1 uppercase tracking-wide">Senha</label>
@@ -110,7 +110,7 @@ HTML_TEMPLATE = """
             </div>
             <div class="flex justify-end gap-3 mt-5">
                 <button onclick="fecharModal('modalEdicao')" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors">Cancelar</button>
-                <button onclick="salvarEdicao()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded font-bold text-sm shadow-lg transition-colors">💾 Salvar</button>
+                <button onclick="salvarEdicao()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded font-bold text-sm shadow-lg transition-colors flex items-center gap-2">💾 Salvar</button>
             </div>
         </div>
     </div>
@@ -201,7 +201,7 @@ HTML_TEMPLATE = """
             <button onclick="limparRoteirizacao()" class="bg-red-700 hover:bg-red-600 text-white text-[11px] font-bold py-1.5 px-3 rounded-lg shadow transition-colors flex items-center gap-1 border border-red-600">🗑️ Limpar</button>
             <button onclick="copiarRotaAnterior()" class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-[11px] font-bold py-1.5 px-3 rounded-lg shadow transition-colors flex items-center gap-1 border border-slate-600">⏳ Repetir Rota</button>
             <button onclick="exportarExcel()" class="bg-emerald-700 hover:bg-emerald-600 text-white text-[11px] font-bold py-1.5 px-3 rounded-lg shadow transition-colors flex items-center gap-1 border border-emerald-600">📥 Exportar</button>
-            <a href="/logout" class="ml-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-bold py-1.5 px-3 rounded-lg shadow transition-colors border border-slate-600" title="Sair">Sair</a>
+            <a href="/logout" class="ml-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-bold py-1.5 px-3 rounded-lg shadow transition-colors border border-slate-600">Sair</a>
         </div>
     </header>
 
@@ -288,7 +288,7 @@ HTML_TEMPLATE = """
                             <div class="flex items-center gap-1.5">
                                 <span class="text-[11px] font-bold px-2 py-0.5 rounded text-white" style="background-color: {{ carro.cor }}">{{ carro.px }}</span>
                                 <span class="text-xs font-mono text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded border border-slate-700">{{ carro.modelo }}</span>
-                                <span class="text-[9px] text-slate-500 uppercase tracking-wide ml-1 flex items-center gap-1 bg-slate-900 px-1.5 py-0.5 rounded cursor-pointer hover:bg-slate-700 transition" onclick="abrirModalCidade('{{ carro.id }}', '{{ carro.cidade }}')" title="Mudar Cidade do Carro">
+                                <span class="text-[9px] text-slate-500 uppercase tracking-wide ml-1 flex items-center gap-1 bg-slate-900 px-1.5 py-0.5 rounded cursor-pointer hover:bg-slate-700 transition" onclick="abrirModalCidade('{{ carro.id }}', '{{ carro.cidade }}')">
                                     {{ carro.cidade }} ⚙️
                                 </span>
                             </div>
@@ -337,7 +337,11 @@ HTML_TEMPLATE = """
 
         var mapa = L.map('mapa', { zoomControl: false }).setView(SEDE_COORDS, 11);
         L.control.zoom({ position: 'topleft' }).addTo(mapa);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(mapa);
+        
+        // MÁGICA DO TILE PROXY: Aponta para a rota intermediária do próprio Flask
+        L.tileLayer('/tiles/{z}/{x}/{y}.png', { 
+            attribution: '© OpenStreetMap' 
+        }).addTo(mapa);
 
         var sedeIcon = L.divIcon({
             html: `<div class="bg-red-600 w-7 h-7 rounded-full flex items-center justify-center border-2 border-white shadow-lg text-white font-bold text-xs">🏢</div>`,
@@ -355,7 +359,6 @@ HTML_TEMPLATE = """
             rotasCarros["{{ carro.id }}"] = L.polyline([], { color: "{{ carro.cor }}", weight: 4, opacity: 0.85 }).addTo(mapa);
         {% endfor %}
 
-        // FILTRO DE CIDADES
         function filtrarCarros() {
             let cidadeSelecionada = document.getElementById('filtroCidade').value;
             let carros = document.querySelectorAll('.item-carro');
@@ -368,7 +371,6 @@ HTML_TEMPLATE = """
             });
         }
 
-        // FUNÇÕES DE ABERTURA DE MODAIS
         function abrirModalEdicao(id, linha, nome, lat, lng) {
             document.getElementById('edit-id').value = id;
             document.getElementById('edit-linha').value = linha;
@@ -401,9 +403,8 @@ HTML_TEMPLATE = """
 
         function fecharModal(idModal) { document.getElementById(idModal).classList.add('hidden'); }
 
-        // AÇÕES DA FERRAMENTA
         function limparRoteirizacao() {
-            if(confirm("⚠️ ATENÇÃO: Tem certeza que deseja LIMPAR TODA A ROTEIRIZAÇÃO do dia " + document.getElementById('data-atual').innerText + "?")) {
+            if(confirm("⚠️ Tem certeza que deseja limpar toda a lotação de hoje?")) {
                 fetch('/api/limpar-roteirizacao', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ data: DATA_ATUAL })
@@ -413,18 +414,17 @@ HTML_TEMPLATE = """
             }
         }
 
-        function copiarRotaAnterior() { alert("Aguarde! O recurso [Repetir Rota] será disponibilizado na próxima atualização."); }
+        function copiarRotaAnterior() { alert("Recurso em desenvolvimento."); }
 
         function exportarExcel() {
             fetch(`/api/exportar?data=${DATA_ATUAL}`)
             .then(res => res.json())
             .then(data => {
-                if(data.status === 'sucesso') alert("✅ Relatório Exportado com Sucesso!\\nArquivo salvo como:\\n" + data.arquivo);
-                else alert("⛔ ERRO AO EXPORTAR:\\n" + data.mensagem);
+                if(data.status === 'sucesso') alert("✅ Relatório Exportado! Salvo como: " + data.arquivo);
+                else alert("⛔ ERRO: " + data.mensagem);
             });
         }
 
-        // REQUISIÇÕES DE SALVAMENTO
         function salvarEdicao() {
             let linha = document.getElementById('edit-linha').value;
             let nome = document.getElementById('edit-nome').value;
@@ -434,8 +434,8 @@ HTML_TEMPLATE = """
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ linha_excel: linha, nome: nome, lat: lat, lng: lng })
             }).then(res => res.json()).then(data => {
-                if(data.status === 'sucesso') window.location.reload(); 
-                else alert("⛔ FECHE O EXCEL!\\n\\n" + data.mensagem);
+                if(data.status === 'sucesso') window.location.reload();
+                else alert("⛔ Erro: " + data.mensagem);
             });
         }
 
@@ -445,13 +445,13 @@ HTML_TEMPLATE = """
             let lng = document.getElementById('add-lng').value.trim();
             let endereco = document.getElementById('add-end').value.trim();
             let bairro = document.getElementById('add-bairro').value.trim();
-            if(!nome || !lat || !lng) { alert("Nome, Latitude e Longitude são obrigatórios!"); return; }
+            if(!nome || !lat || !lng) { alert("Campos obrigatórios faltando."); return; }
             fetch('/api/adicionar-passageiro', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ nome: nome, lat: lat, lng: lng, endereco: endereco, bairro: bairro })
             }).then(res => res.json()).then(data => {
-                if(data.status === 'sucesso') window.location.reload(); 
-                else alert("⛔ FECHE O EXCEL ANTES DE SALVAR!\\n\\n" + data.mensagem);
+                if(data.status === 'sucesso') window.location.reload();
+                else alert("⛔ Erro: " + data.mensagem);
             });
         }
 
@@ -471,7 +471,7 @@ HTML_TEMPLATE = """
             let cidade = document.getElementById('cid-nome').value;
             fetch('/api/editar-cidade-carro', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ car_id: carId, cidade: cidade })
+                body: JSON.stringify({ car_id: carId, cidade: city = cidade })
             }).then(res => res.json()).then(data => {
                 if(data.status === 'sucesso') window.location.reload();
             });
@@ -488,7 +488,6 @@ HTML_TEMPLATE = """
             fetch('/api/salvar-estado', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: DATA_ATUAL, estado: estado }) });
         }
 
-        // LÓGICA DE DRAG & DROP E PLOTAGEM DO MAPA MANTIDAS IGUAIS (APENAS OMITIDAS PARA RESUMO, O CÓDIGO FUNCIONA IGUAL A VERSÃO ANTERIOR)
         function atualizarContadorDisponiveis() {
             let count = 0;
             document.querySelectorAll('#lista-passageiros > div').forEach(el => {
@@ -516,7 +515,7 @@ HTML_TEMPLATE = """
                 let isAlocado = p.carro_atual ? true : false;
                 
                 let primeiroNome = p.nome.split(' ')[0];
-                let corFundo = isAlocado ? coresCarros[p.carro_atual] : '#dc2626'; // Vermelho
+                let corFundo = isAlocado ? coresCarros[p.carro_atual] : '#dc2626';
                 let opacidade = isAlocado ? '0.9' : '1';
                 let classExtra = isAlocado ? "pointer-events-none" : "hover:bg-red-500 cursor-grab active:cursor-grabbing";
 
@@ -537,7 +536,6 @@ HTML_TEMPLATE = """
             }
         });
 
-        // DRAG & DROP EVENTOS
         function allowDrop(ev) { ev.preventDefault(); ev.currentTarget.classList.add('drag-over'); }
         function dragLeave(ev) { ev.currentTarget.classList.remove('drag-over'); }
         function drag(ev) { ev.dataTransfer.setData("text/plain", ev.target.id); }
@@ -624,7 +622,7 @@ HTML_TEMPLATE = """
             notificarBackend();
         }
 
-        // MOTOR OSRM
+        // MÁGICA REAL: OSRM Roteia através da nossa API Proxy no Render
         async function recalcularLinhaRota(carId) {
             let listPassIds = sequenciaCarros[carId];
             let arrayCoords = [SEDE_COORDS]; 
@@ -641,7 +639,7 @@ HTML_TEMPLATE = """
             }
 
             let coordenadasOSRM = arrayCoords.map(c => `${c[1]},${c[0]}`).join(';');
-            let url = `https://router.project-osrm.org/route/v1/driving/${coordenadasOSRM}?overview=full&geometries=geojson`;
+            let url = `/api/route-proxy?coords=${coordenadasOSRM}`;
 
             try {
                 let response = await fetch(url);
@@ -668,7 +666,7 @@ HTML_TEMPLATE = """
             document.getElementById(`km-${carId}`).innerText = `${(acumuladoMetros / 1000).toFixed(2)} KM`;
         }
 
-        function calcularRotaIdeal() { alert("Aguardando motor de otimização..."); }
+        function calcularRotaIdeal() { alert("Otimizador carregando..."); }
         Object.keys(sequenciaCarros).forEach(carId => { recalcularLinhaRota(carId); });
     </script>
 </body>
@@ -676,13 +674,12 @@ HTML_TEMPLATE = """
 """
 
 # ==========================================
-# 2. SISTEMA DE BACKEND E EXCEL
+# 2. SISTEMA DE BACKEND E OPERAÇÃO PROXY
 # ==========================================
 
-# Middleware: Exige Login em todas as rotas
 @app.before_request
 def require_login():
-    endpoints_publicos = ['login', 'static']
+    endpoints_publicos = ['login', 'static', 'tile_proxy']
     if request.endpoint not in endpoints_publicos and 'logged_in' not in session:
         return redirect(url_for('login'))
 
@@ -693,13 +690,12 @@ def login():
         usuario = request.form.get('usuario')
         senha = request.form.get('senha')
         
-        # Acesso Padrão 
-        if usuario == 'admin' and senha == 'admin':
+        # CREDENCIAIS NOVAS ATUALIZADAS
+        if usuario == 'treinando' and senha == 'Goiasa123':
             session['logged_in'] = True
             return redirect(url_for('index'))
         else:
-            erro = "Usuário ou senha incorretos. Tente novamente."
-            
+            erro = "Usuário ou senha incorretos."
     return render_template_string(LOGIN_TEMPLATE, erro=erro)
 
 @app.route('/logout')
@@ -707,6 +703,32 @@ def logout():
     session.pop('logged_in', None)
     return redirect(url_for('login'))
 
+# MOTOR TILE PROXY: O segredo para contornar o bloqueio de firewall do OpenStreetMap
+@app.route('/tiles/<int:z>/<int:x>/<int:y>.png')
+def tile_proxy(z, x, y):
+    try:
+        url = f"https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        # User-Agent limpo para evitar bloqueio por segurança no OSM
+        headers = {"User-Agent": "GoiasaRoteirizadorApp/2.0"}
+        res = requests.get(url, headers=headers, timeout=6)
+        if res.status_code == 200:
+            return Response(res.content, mimetype='image/png')
+    except Exception as e:
+        print(f"Falha de Proxy de Bloco: {e}")
+    return "", 404
+
+# MOTOR API PROXY ROTA: Impede que o OSRM falhe por restrição de API no navegador corporativo
+@app.route('/api/route-proxy')
+def route_proxy():
+    coords = request.args.get('coords')
+    if not coords:
+        return jsonify({"code": "Error", "message": "Falta coordenadas"}), 400
+    try:
+        url = f"https://router.project-osrm.org/route/v1/driving/{coords}?overview=full&geometries=geojson"
+        res = requests.get(url, timeout=8)
+        return jsonify(res.json())
+    except Exception as e:
+        return jsonify({"code": "Error", "message": str(e)}), 500
 
 def gerenciar_banco_estado():
     if not os.path.exists(DB_ESTADO_PATH):
@@ -742,7 +764,6 @@ def carregar_passageiros_excel(data_atual):
     try:
         df = pd.read_excel(PLANILHA_PATH, sheet_name='BASE', header=None, dtype=str)
         counter = 1
-        
         for i in range(1, len(df)):
             linha_absoluta = i + 1 
             row = df.iloc[i]
@@ -782,11 +803,9 @@ def carregar_passageiros_excel(data_atual):
             counter += 1
     except Exception as e:
         print(f"Erro na leitura: {e}")
-        
     return passageiros
 
 def gerar_frota_operacional():
-    # Pega as cidades salvas do banco de dados (que você editou)
     estado_db = gerenciar_banco_estado()
     cidades_salvas = estado_db.get("cidades_carros", {})
 
@@ -821,13 +840,9 @@ def gerar_frota_operacional():
         {"id": "V_PON_1723", "px": "PX-1723", "modelo": "Spin", "cidade_padrao": "Pontalina", "lotacao_max": 7, "cor": "#14b8a6", "motorista_padrao": ""},
     ]
 
-    # Aplica a cidade salva se existir, senão usa a padrão
     for carro in frota_base:
         carro["cidade"] = cidades_salvas.get(carro["id"], carro["cidade_padrao"])
-        
     return frota_base
-
-# ----------------- ROTAS DO SERVIDOR -----------------
 
 @app.route('/')
 def index():
@@ -844,7 +859,6 @@ def index():
     
     estado_db = gerenciar_banco_estado()
     motoristas = estado_db.get("motoristas", {})
-    
     return render_template_string(HTML_TEMPLATE, passageiros=passageiros, frota=frota, sede_coords=SEDE_COORDS, 
                                   data_atual_iso=data_req, data_formatada=data_formatada, 
                                   data_prev_iso=data_prev_iso, data_next_iso=data_next_iso, motoristas=motoristas)
@@ -852,17 +866,10 @@ def index():
 @app.route('/api/editar-cidade-carro', methods=['POST'])
 def editar_cidade_carro():
     dados = request.json
-    car_id = dados.get('car_id')
-    cidade_nova = dados.get('cidade')
-
     db = gerenciar_banco_estado()
-    if 'cidades_carros' not in db: db['cidades_carros'] = {}
-    
-    db['cidades_carros'][car_id] = cidade_nova
-
+    db['cidades_carros'][dados.get('car_id')] = dados.get('cidade')
     with open(DB_ESTADO_PATH, 'w', encoding='utf-8') as f:
         json.dump(db, f, ensure_ascii=False, indent=4)
-
     return jsonify({"status": "sucesso"})
 
 @app.route('/api/editar-motorista', methods=['POST'])
@@ -871,7 +878,6 @@ def editar_motorista():
     car_id = dados.get('car_id')
     nome = dados.get('nome')
     db = gerenciar_banco_estado()
-    if 'motoristas' not in db: db['motoristas'] = {}
     if not nome or str(nome).strip() == "":
         if car_id in db['motoristas']: del db['motoristas'][car_id]
     else:
@@ -894,10 +900,9 @@ def limpar_roteirizacao():
     dados = request.json
     data_req = dados.get('data')
     db = gerenciar_banco_estado()
-    if data_req in db:
-        db[data_req] = {} 
-        with open(DB_ESTADO_PATH, 'w', encoding='utf-8') as f:
-            json.dump(db, f, ensure_ascii=False, indent=4)
+    db[data_req] = {} 
+    with open(DB_ESTADO_PATH, 'w', encoding='utf-8') as f:
+        json.dump(db, f, ensure_ascii=False, indent=4)
     return jsonify({"status": "sucesso"})
 
 @app.route('/api/editar-passageiro', methods=['POST'])
@@ -935,7 +940,7 @@ def adicionar_passageiro():
 @app.route('/api/exportar')
 def exportar_excel():
     data_req = request.args.get('data')
-    if not data_req: return jsonify({"status": "erro", "mensagem": "Data não fornecida."})
+    if not data_req: return jsonify({"status": "erro", "mensagem": "Data inválida."})
     passageiros = carregar_passageiros_excel(data_req)
     frota = {c['id']: c for c in gerar_frota_operacional()}
     estado_db = gerenciar_banco_estado()
@@ -949,25 +954,9 @@ def exportar_excel():
             px = veiculo.get('px', '-')
             cidade = veiculo.get('cidade', '-')
             motorista = motoristas.get(carro_id, veiculo.get('motorista_padrao', 'Sem Motorista Fixo')) if veiculo.get('cidade') == 'Itumbiara' else 'N/A'
-            dados_export.append({
-                "ID": p['id'],
-                "Passageiro": p['nome'],
-                "Endereço": p['endereco'],
-                "Bairro": p['bairro'],
-                "Cidade Base do Carro": cidade,
-                "Veículo (PX)": px,
-                "Motorista": motorista
-            })
+            dados_export.append({"ID": p['id'], "Passageiro": p['nome'], "Endereço": p['endereco'], "Bairro": p['bairro'], "Cidade Base do Carro": cidade, "Veículo (PX)": px, "Motorista": motorista})
         else:
-            dados_export.append({
-                "ID": p['id'],
-                "Passageiro": p['nome'],
-                "Endereço": p['endereco'],
-                "Bairro": p['bairro'],
-                "Cidade Base do Carro": "Não Alocado",
-                "Veículo (PX)": "Não Alocado",
-                "Motorista": "-"
-            })
+            dados_export.append({"ID": p['id'], "Passageiro": p['nome'], "Endereço": p['endereco'], "Bairro": p['bairro'], "Cidade Base do Carro": "Não Alocado", "Veículo (PX)": "Não Alocado", "Motorista": "-"})
             
     df_export = pd.DataFrame(dados_export)
     df_export.sort_values(by=["Cidade Base do Carro", "Veículo (PX)", "Passageiro"], inplace=True)
@@ -977,7 +966,7 @@ def exportar_excel():
     try:
         df_export.to_excel(caminho_salvar, index=False)
         return jsonify({"status": "sucesso", "arquivo": nome_arquivo})
-    except PermissionError: return jsonify({"status": "erro", "mensagem": f"O Excel está bloqueando a gravação do arquivo {nome_arquivo}."})
+    except PermissionError: return jsonify({"status": "erro", "mensagem": f"O Excel está em uso."})
     except Exception as e: return jsonify({"status": "erro", "mensagem": str(e)})
 
 if __name__ == '__main__':
