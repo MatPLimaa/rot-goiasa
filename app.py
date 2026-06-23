@@ -1,5 +1,6 @@
 from flask import Flask, render_template_string, jsonify, request, session, redirect, url_for, Response
 from datetime import datetime, timedelta
+from functools import lru_cache
 import pandas as pd
 import openpyxl
 import os
@@ -184,6 +185,18 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <div id="modalAlocacaoMassa" class="hidden fixed inset-0 bg-black/80 z-[4000] flex items-center justify-center backdrop-blur-sm">
+        <div class="bg-slate-800 p-6 rounded-xl w-[420px] border border-purple-600/50 shadow-2xl">
+            <h3 class="text-white text-lg font-bold mb-2 flex items-center gap-2 text-purple-400">🔦 Alocação em Massa (<span id="massa-count">0</span>)</h3>
+            <p class="text-slate-400 text-xs mb-4">Selecione o veículo abaixo para alocar os passageiros capturados no laço:</p>
+            <div class="space-y-2 max-h-[250px] overflow-y-auto pr-1" id="massa-lista-carros">
+                </div>
+            <div class="flex justify-end gap-3 mt-5">
+                <button onclick="fecharModal('modalAlocacaoMassa')" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors">Cancelar</button>
+            </div>
+        </div>
+    </div>
+
     <header class="h-14 bg-slate-900 border-b border-slate-800 flex justify-between items-center px-6 shadow-md z-50 relative">
         <div class="flex items-center gap-3">
             <img src="{{ url_for('static', filename='brand_green.png') }}" alt="Goiasa Logo" class="h-8 object-contain">
@@ -208,9 +221,14 @@ HTML_TEMPLATE = """
     <div class="grid-principal">
         <div class="coluna-esquerda border-r border-slate-800">
             <div id="mapa" class="w-full h-full relative bg-slate-950/50">
-                <button onclick="calcularRotaIdeal()" class="absolute top-4 right-4 z-[1000] bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-5 rounded-lg shadow-xl transition-all border border-blue-500 cursor-pointer text-sm tracking-wide">
-                    ✨ Rota Ideal
-                </button>
+                <div class="absolute top-4 right-4 z-[1000] flex flex-col gap-2">
+                    <button onclick="calcularRotaIdeal()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-5 rounded-lg shadow-xl transition-all border border-blue-500 cursor-pointer text-sm tracking-wide">
+                        ✨ Rota Ideal
+                    </button>
+                    <button id="btn-lasso" onclick="alternarLasso()" class="bg-slate-800 hover:bg-slate-700 text-purple-400 font-bold py-2.5 px-5 rounded-lg shadow-xl transition-all border border-slate-700 cursor-pointer text-sm tracking-wide flex items-center gap-2 justify-center">
+                        🔦 Laço (Selecionar Vários)
+                    </button>
+                </div>
             </div>
 
             <div class="bg-slate-900 p-4 flex flex-col h-full overflow-hidden">
@@ -338,7 +356,6 @@ HTML_TEMPLATE = """
         var mapa = L.map('mapa', { zoomControl: false }).setView(SEDE_COORDS, 11);
         L.control.zoom({ position: 'topleft' }).addTo(mapa);
         
-        // MÁGICA DO TILE PROXY: Aponta para a rota intermediária do próprio Flask
         L.tileLayer('/tiles/{z}/{x}/{y}.png', { 
             attribution: '© OpenStreetMap' 
         }).addTo(mapa);
@@ -359,6 +376,141 @@ HTML_TEMPLATE = """
             rotasCarros["{{ carro.id }}"] = L.polyline([], { color: "{{ carro.cor }}", weight: 4, opacity: 0.85 }).addTo(mapa);
         {% endfor %}
 
+        // ==========================================
+        // ENGENHARIA DA FERRAMENTA LAÇO (SELEÇÃO)
+        // ==========================================
+        let lassoAtivo = false;
+        let lassoLayer = null;
+        let startLatLng = null;
+        let passageirosSelecionadosMassa = [];
+
+        function alternarLasso() {
+            lassoAtivo = !lassoAtivo;
+            const btn = document.getElementById('btn-lasso');
+            if (lassoAtivo) {
+                btn.className = "bg-purple-600 hover:bg-purple-700 text-white font-bold py-2.5 px-5 rounded-lg shadow-xl transition-all border border-purple-500 cursor-pointer text-sm tracking-wide animate-pulse flex items-center gap-2 justify-center";
+                mapa.dragging.disable();
+                mapa.getContainer().style.cursor = 'crosshair';
+            } else {
+                btn.className = "bg-slate-800 hover:bg-slate-700 text-purple-400 font-bold py-2.5 px-5 rounded-lg shadow-xl transition-all border border-slate-700 cursor-pointer text-sm tracking-wide flex items-center gap-2 justify-center";
+                mapa.dragging.enable();
+                mapa.getContainer().style.cursor = '';
+                if (lassoLayer) { mapa.removeLayer(lassoLayer); lassoLayer = null; }
+            }
+        }
+
+        mapa.on('mousedown', function(e) {
+            if (!lassoAtivo) return;
+            startLatLng = e.latlng;
+            if (lassoLayer) { mapa.removeLayer(lassoLayer); }
+            lassoLayer = L.rectangle([startLatLng, startLatLng], {color: "#a855f7", weight: 2, fillColor: "#a855f7", fillOpacity: 0.15}).addTo(mapa);
+        });
+
+        mapa.on('mousemove', function(e) {
+            if (!lassoAtivo || !lassoLayer || !startLatLng) return;
+            lassoLayer.setBounds([startLatLng, e.latlng]);
+        });
+
+        mapa.on('mouseup', function(e) {
+            if (!lassoAtivo || !lassoLayer || !startLatLng) return;
+            let bounds = lassoLayer.getBounds();
+            
+            // Filtra os marcadores dentro da área que estão livres
+            let selecionados = passageirosDados.filter(p => {
+                if (!p.atribuivel || p.carro_atual || !p.lat || !p.lng) return false;
+                return bounds.contains([p.lat, p.lng]);
+            });
+
+            if (selecionados.length > 0) {
+                abrirModalAlocacaoMassa(selecionados);
+            } else {
+                alert("Nenhum passageiro livre foi encontrado na área circulada.");
+            }
+
+            if (lassoLayer) { mapa.removeLayer(lassoLayer); lassoLayer = null; }
+            startLatLng = null;
+            alternarLasso(); // Desliga o modo laço
+        });
+
+        function abrirModalAlocacaoMassa(selecionados) {
+            passageirosSelecionadosMassa = selecionados;
+            document.getElementById('massa-count').innerText = selecionados.length;
+            
+            let container = document.getElementById('massa-lista-carros');
+            container.innerHTML = '';
+            
+            document.querySelectorAll('.item-carro').forEach(carEl => {
+                if (carEl.style.display === 'none') return; // ignora carros filtrados
+                let id = carEl.id.replace('carro-', '');
+                let px = carEl.querySelector('.font-bold.px-2').innerText;
+                let modelo = carEl.querySelector('.font-mono').innerText;
+                let cidade = carEl.getAttribute('data-cidade');
+                
+                let badge = document.getElementById(`badge-lota-${id}`);
+                let max = parseInt(badge.innerText.split('/')[1].trim());
+                let ocupados = parseInt(badge.innerText.split('/')[0].trim());
+                let vagas = max - ocupados;
+
+                let btn = document.createElement('button');
+                btn.className = `w-full text-left bg-slate-900 border border-slate-700 hover:border-purple-500 text-slate-200 p-2.5 rounded-lg text-xs flex justify-between items-center transition-all ${vagas < selecionados.length ? 'opacity-40 cursor-not-allowed' : 'hover:bg-slate-950'}`;
+                if (vagas < selecionados.length) {
+                    btn.disabled = true;
+                } else {
+                    btn.onclick = () => alocarMassaParaCarro(id, max);
+                }
+                
+                btn.innerHTML = `<div><span class="font-bold text-purple-400 mr-2">${px}</span> <span class="text-slate-400">(${modelo} - ${cidade})</span></div>
+                                 <div class="text-[10px] bg-slate-800 px-2 py-0.5 rounded border border-slate-700">Vagas: ${vagas}</div>`;
+                container.appendChild(btn);
+            });
+
+            document.getElementById('modalAlocacaoMassa').classList.remove('hidden');
+        }
+
+        function alocarMassaParaCarro(carId, max) {
+            let containerPassageiros = document.getElementById(`inside-${carId}`);
+            let aviso = containerPassageiros.querySelector('.painel-vazio');
+            if (aviso) aviso.style.display = 'none';
+
+            passageirosSelecionadosMassa.forEach(p => {
+                let passId = p.id.toString();
+                let passengerEl = document.getElementById('pass-' + passId);
+                if (!passengerEl) return;
+
+                sequenciaCarros[carId].push(passId);
+
+                let miniCard = document.createElement('div');
+                miniCard.className = 'mini-card-passageiro bg-slate-900/80 text-slate-200 p-1.5 rounded-md flex justify-between items-center text-[11px] border border-slate-700/60 shadow-inner';
+                miniCard.setAttribute('data-id', passId);
+                miniCard.setAttribute('data-nome', p.nome);
+                miniCard.innerHTML = `<span class="truncate font-medium pr-1"><b class="text-slate-500 mr-1">ID:${passId}</b>${p.nome}</span>
+                                      <button onclick="removerPassageiroDaMemoria('${passId}', '${carId}', this)" class="text-red-400 hover:text-red-500 font-bold text-xs px-1.5 cursor-pointer">×</button>`;
+                
+                containerPassageiros.appendChild(miniCard);
+                passengerEl.style.display = 'none';
+                
+                let iconEl = document.getElementById(`marker-icon-${passId}`);
+                if(iconEl) {
+                    iconEl.style.backgroundColor = coresCarros[carId];
+                    iconEl.style.opacity = "0.9";
+                    iconEl.className = "text-white px-2 py-1 rounded-full flex items-center justify-center font-bold text-[10px] shadow-md border border-white pointer-events-none whitespace-nowrap min-w-[30px]";
+                    iconEl.setAttribute('draggable', 'false');
+                }
+                
+                // Sincroniza no array local
+                let localP = passageirosDados.find(item => item.id == passId);
+                if (localP) localP.carro_atual = carId;
+            });
+
+            let novosOcupantes = containerPassageiros.querySelectorAll('.mini-card-passageiro').length;
+            atualizarContadorVeh(carId, novosOcupantes, max);
+            recalcularLinhaRota(carId);
+            atualizarContadorDisponiveis();
+            notificarBackend();
+            fecharModal('modalAlocacaoMassa');
+        }
+
+        // CONTROLADORES DA TELA
         function filtrarCarros() {
             let cidadeSelecionada = document.getElementById('filtroCidade').value;
             let carros = document.querySelectorAll('.item-carro');
@@ -471,7 +623,7 @@ HTML_TEMPLATE = """
             let cidade = document.getElementById('cid-nome').value;
             fetch('/api/editar-cidade-carro', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ car_id: carId, cidade: city = cidade })
+                body: JSON.stringify({ car_id: carId, cidade: cidade })
             }).then(res => res.json()).then(data => {
                 if(data.status === 'sucesso') window.location.reload();
             });
@@ -536,6 +688,7 @@ HTML_TEMPLATE = """
             }
         });
 
+        // DRAG & DROP EVENTOS
         function allowDrop(ev) { ev.preventDefault(); ev.currentTarget.classList.add('drag-over'); }
         function dragLeave(ev) { ev.currentTarget.classList.remove('drag-over'); }
         function drag(ev) { ev.dataTransfer.setData("text/plain", ev.target.id); }
@@ -584,6 +737,10 @@ HTML_TEMPLATE = """
                 iconEl.setAttribute('draggable', 'false');
             }
 
+            // Sincroniza no array local
+            let localP = passageirosDados.find(item => item.id == passId);
+            if (localP) localP.carro_atual = carId;
+
             atualizarContadorVeh(carId, ocupantesAtuais + 1, max);
             recalcularLinhaRota(carId);
             atualizarContadorDisponiveis();
@@ -611,6 +768,10 @@ HTML_TEMPLATE = """
                 iconEl.setAttribute('draggable', 'true');
             }
 
+            // Sincroniza no array local
+            let localP = passageirosDados.find(item => item.id == passId);
+            if (localP) localP.carro_atual = null;
+
             if (ocupantesAtuais === 0) {
                 let aviso = containerPassageiros.querySelector('.painel-vazio');
                 if (aviso) aviso.style.display = 'block';
@@ -622,7 +783,7 @@ HTML_TEMPLATE = """
             notificarBackend();
         }
 
-        // MÁGICA REAL: OSRM Roteia através da nossa API Proxy no Render
+        // MOTOR OSRM PROXY
         async function recalcularLinhaRota(carId) {
             let listPassIds = sequenciaCarros[carId];
             let arrayCoords = [SEDE_COORDS]; 
@@ -668,6 +829,7 @@ HTML_TEMPLATE = """
 
         function calcularRotaIdeal() { alert("Otimizador carregando..."); }
         Object.keys(sequenciaCarros).forEach(carId => { recalcularLinhaRota(carId); });
+        atualizarContadorDisponiveis();
     </script>
 </body>
 </html>
@@ -690,7 +852,6 @@ def login():
         usuario = request.form.get('usuario')
         senha = request.form.get('senha')
         
-        # CREDENCIAIS NOVAS ATUALIZADAS
         if usuario == 'treinando' and senha == 'Goiasa123':
             session['logged_in'] = True
             return redirect(url_for('index'))
@@ -703,21 +864,29 @@ def logout():
     session.pop('logged_in', None)
     return redirect(url_for('login'))
 
-# MOTOR TILE PROXY: O segredo para contornar o bloqueio de firewall do OpenStreetMap
+
+# ENGENHARIA DO PROXY MAPA COM LRU_CACHE (MÁXIMA VELOCIDADE)
+@lru_cache(maxsize=1500)
+def buscar_bloco_no_osm(z, x, y):
+    url = f"https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"
+    headers = {"User-Agent": "GoiasaRoteirizadorApp/2.0"}
+    try:
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            return res.content
+    except Exception as e:
+        print(f"Erro na conexao com OSM: {e}")
+    return None
+
 @app.route('/tiles/<int:z>/<int:x>/<int:y>.png')
 def tile_proxy(z, x, y):
-    try:
-        url = f"https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        # User-Agent limpo para evitar bloqueio por segurança no OSM
-        headers = {"User-Agent": "GoiasaRoteirizadorApp/2.0"}
-        res = requests.get(url, headers=headers, timeout=6)
-        if res.status_code == 200:
-            return Response(res.content, mimetype='image/png')
-    except Exception as e:
-        print(f"Falha de Proxy de Bloco: {e}")
+    image_data = buscar_bloco_no_osm(z, x, y)
+    if image_data:
+        # Retorna a imagem aplicando cabeçalho de cache de 7 dias para o navegador corporativo
+        return Response(image_data, mimetype='image/png', headers={'Cache-Control': 'public, max-age=604800'})
     return "", 404
 
-# MOTOR API PROXY ROTA: Impede que o OSRM falhe por restrição de API no navegador corporativo
+
 @app.route('/api/route-proxy')
 def route_proxy():
     coords = request.args.get('coords')
